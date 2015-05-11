@@ -109,7 +109,7 @@ class VirshSession(aexpect.ShellSession):
                  remote_user=None, remote_pwd=None,
                  ssh_remote_auth=False, readonly=False,
                  unprivileged_user=None,
-                 auto_close=False):
+                 auto_close=False, check_libvirtd=True):
         """
         Initialize virsh session server, or client if id set.
 
@@ -149,8 +149,11 @@ class VirshSession(aexpect.ShellSession):
             # ssh_cmd is not None flags this as remote session
             ssh_cmd = ("ssh -o UserKnownHostsFile=/dev/null %s -p %s %s@%s"
                        % (pref_auth, 22, self.remote_user, self.remote_ip))
-            self.virsh_exec = ("%s \"%s -c '%s'\""
-                               % (ssh_cmd, virsh_exec, self.uri))
+            if uri:
+                self.virsh_exec = ("%s \"%s -c '%s'\""
+                                   % (ssh_cmd, virsh_exec, self.uri))
+            else:
+                self.virsh_exec = ("%s \"%s\"" % (ssh_cmd, virsh_exec))
         else:  # setting up a local session or re-using a session
             self.virsh_exec = virsh_exec
             if self.uri:
@@ -177,11 +180,12 @@ class VirshSession(aexpect.ShellSession):
                                   prompt, debug=True)
 
         # fail if libvirtd is not running
-        if self.cmd_status('list', timeout=60) != 0:
-            logging.debug("Persistent virsh session is not responding, "
-                          "libvirtd may be dead.")
-            self.auto_close = True
-            raise aexpect.ShellStatusError(virsh_exec, 'list')
+        if check_libvirtd:
+            if self.cmd_status('list', timeout=60) != 0:
+                logging.debug("Persistent virsh session is not responding, "
+                              "libvirtd may be dead.")
+                self.auto_close = True
+                raise aexpect.ShellStatusError(virsh_exec, 'list')
 
     def cmd_status_output(self, cmd, timeout=60, internal_timeout=None,
                           print_func=None):
