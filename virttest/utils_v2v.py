@@ -14,6 +14,9 @@ import aexpect
 from autotest.client import os_dep, utils
 from autotest.client.shared import ssh_key
 import virsh
+import ppm_utils
+import data_dir
+import remote
 
 import libvirt_vm as lvirt
 
@@ -211,6 +214,7 @@ class VMCheck(object):
         self.env = env
         self.params = params
         self.name = params.get('main_vm')
+        self.os_version = params.get("os_version")
         self.target = params.get('target')
         self.username = params.get('vm_user', 'root')
         self.password = params.get('vm_pwd')
@@ -218,6 +222,7 @@ class VMCheck(object):
         self.nic_index = params.get('nic_index', 0)
         self.export_name = params.get('export_name')
         self.delete_vm = 'yes' == params.get('vm_cleanup', 'yes')
+        self.virsh_session_id = params.get("virsh_session_id")
 
         if self.name is None:
             logging.error("vm name not exist")
@@ -232,18 +237,15 @@ class VMCheck(object):
         else:
             raise ValueError("Doesn't support %s target now" % self.target)
 
-        if self.vm.is_alive():
-            self.vm.shutdown()
-            self.vm.start()
-        else:
-            self.vm.start()
+        # Will create Windows session in WindowsVMCheck.init_boot
+        if self.os_type == "linux":
+            self.create_session()
 
-        logging.debug("Succeed to start '%s'", self.name)
+    def create_session(self):
         self.session = self.vm.wait_for_login(nic_index=self.nic_index,
                                               timeout=self.timeout,
                                               username=self.username,
                                               password=self.password)
-
     def vm_cleanup(self):
         """
         Cleanup VM including remove all storage files about guest
@@ -421,9 +423,202 @@ class LinuxVMCheck(VMCheck):
 class WindowsVMCheck(VMCheck):
 
     """
-    This class handles all basic windows VM check operations.
+    This class handles all basic Windows VM check operations.
     """
-    pass
+
+    # Timeout definition for session login.
+    LOGIN_TIMEOUT = 480
+
+    def _send_win32_key(self, keycode):
+        """
+        Send key to Windows VM
+        """
+        options = "--codeset win32 %s" % keycode
+        virsh.sendkey(self.name, options, session_id=self.virsh_session_id)
+        time.sleep(1)
+
+    def _move_mouse(self, coordinate):
+        """
+        Move VM mouse.
+        """
+        virsh.move_mouse(self.name, coordinate, session_id=self.virsh_session_id)
+
+    def _click_left_button(self):
+        """
+        Click left button of VM mouse.
+        """
+        virsh.click_button(self.name, session_id=self.virsh_session_id)
+
+    def _click_tab_enter(self):
+        """
+        Send TAB and ENTER to VM.
+        """
+        self._send_win32_key('VK_TAB')
+        self._send_win32_key('VK_RETURN')
+
+    def _click_install_driver(self):
+        """
+        Move mouse and click button to install dirver for new
+        device(Ethernet controller)
+        """
+        # Get window focus by click left button
+        self._move_mouse((0, -80))
+        self._click_left_button()
+        self._move_mouse((0, 30))
+        self._click_left_button()
+
+    def _get_screenshot(self):
+        """
+        Do virsh screenshot of the vm and fetch the image if the VM in
+        remote host.
+        """
+        sshot_file = os.path.join(data_dir.get_tmp_dir(), "vm_screenshot.ppm")
+        if self.virsh_session_id:
+            vm_sshot = "/tmp/vm_screenshot.ppm"
+        else:
+            vm_sshot = sshot_file
+        virsh.screenshot(self.name, vm_sshot, session_id=self.virsh_session_id)
+        if self.virsh_session_id:
+            remote_ip = self.params.get("remote_ip")
+            remote_user = self.params.get("remote_user")
+            remote_pwd = self.params.get("remote_pwd")
+            remote.scp_from_remote(remote_ip, '22', remote_user,
+                                   remote_pwd, vm_sshot, sshot_file)
+        return sshot_file
+
+    def _wait_for_image_match(self, image, similar_degree=0.98,
+                              timeout=180):
+        """
+        Compare VM screenshot with given image, and return true if the
+        result is greater than expected smimlar degree.
+        """
+        end_time = time.time() + timeout
+        image_matched = False
+        cropped_image = os.path.join(data_dir.get_tmp_dir(), "croped.ppm")
+        box = (150, 100, 650, 500)
+        ppm_utils.image_crop_save(image, cropped_image, box)
+        while time.time() < end_time:
+            vm_screenshot = self._get_screenshot()
+            ppm_utils.image_crop_save(vm_screenshot, vm_screenshot, box)
+            logging.info("Compare vm screenshot with image %s", image)
+            h_degree = ppm_utils.image_histogram_compare(cropped_image, vm_screenshot)
+            if h_degree >= similar_degree:
+                logging.debug("Image %s matched", image)
+                image_matched = True
+                break
+            time.sleep(2)
+        if os.path.exists(cropped_image):
+            os.unlink(cropped_image)
+        if os.path.exists(vm_screenshot):
+            os.unlink(vm_screenshot)
+        return image_matched
+
+    def init_boot(self):
+        """
+        Click buttons to let boot progress keep going and install NIC driver.
+        """
+        image_name = self.params.get("images_for_match")
+        match_image = os.path.join(data_dir.get_data_dir(), image_name)
+        match_image_timeout = 180
+        timeout_msg = "Not match expected image %s in %s seconds,"
+        timeout_msg += " so try to login VM directly"
+        timeout_msg = timeout_msg % (match_image, match_image_timeout)
+        if self.os_version == "win2003":
+            if self._wait_for_image_match(match_image,
+                                          timeout=match_image_timeout):
+                self._click_tab_enter()
+            else:
+                logging.debug(timeout_msg)
+        elif self.os_version in ["win7", "win2008r2"]:
+            if self._wait_for_image_match(match_image,
+                                          timeout=match_image_timeout):
+                self._click_left_button()
+                self._click_left_button()
+                self._send_win32_key('VK_TAB')
+                self._click_tab_enter()
+            else:
+                logging.debug(timeout_msg)
+        elif self.os_version == "win2008":
+            if self._wait_for_image_match(match_image,
+                                          timeout=match_image_timeout):
+                self._click_tab_enter()
+                self._click_install_driver()
+                self._move_mouse((0, -50))
+                self._click_left_button()
+                self._click_tab_enter()
+            else:
+                logging.debug(timeout_msg)
+        else:
+            # No need sendkey/click button for Win8, Win8.1, Win2012, Win2012r2,
+            # so just wait a pediod of time for system boot up.
+            logging.info("%s is booting up ...", self.os_version)
+            time.sleep(30)
+        # Wait 10 seconds for drivers installation
+        time.sleep(10)
+        self.create_session()
+
+    def get_viostor_info(self):
+        """
+        Get viostor info.
+        """
+        cmd = "dir C:\Windows\Drivers\VirtIO\\viostor.sys"
+        output = self.session.cmd(cmd)
+        logging.debug("The viostor info is: %s" % output)
+        return output
+
+
+    def get_driver_info(self):
+        """
+        Get windows signed driver info.
+        """
+        cmd = "DRIVERQUERY /SI"
+        output = self.session.cmd(cmd)
+        logging.debug("The driver info is: %s" % output)
+        return output
+
+
+    def get_windows_event_info(self):
+        """
+        Get windows event log info about WSH.
+        """
+        cmd = "CSCRIPT C:\WINDOWS\system32\eventquery.vbs /l application /Fi \"Source eq WSH\""
+        status, output = self.session.cmd_status_output(cmd)
+        if status != 0:
+            #if the OS version was not win2003 or winXP, use following cmd
+            cmd = "wevtutil qe application | find \"WSH\""
+            output = self.session.cmd(cmd)
+        logging.debug("The windows event log info about WSH is: %s" % output)
+        return output
+
+
+    def get_network_restart(self):
+        """
+        Get windows network restart.
+        """
+        cmd = "ipconfig /renew"
+        output = self.session.cmd(cmd)
+        logging.debug("The windows network restart info is: %s" % output)
+        return output
+
+
+    def copy_windows_file(self):
+        """
+        Copy a widnows file
+        """
+        cmd = "COPY /y C:\\rss.reg C:\\rss.reg.bak"
+        status, _ = self.session.cmd_status_output(cmd)
+        logging.debug("Copy a windows file status is : %s" % status)
+        return status
+
+
+    def delete_windows_file(self):
+        """
+        Delete a widnows file
+        """
+        cmd = "DEL C:\rss.reg.bak"
+        status, _ = self.session.cmd_status_output(cmd)
+        logging.debug("Delete a windows file status is : %s" % status)
+        return status
 
 
 def v2v_cmd(params):
