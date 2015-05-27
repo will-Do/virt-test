@@ -4144,3 +4144,36 @@ def event(domain=None, event=None, event_timeout=None, options="", **dargs):
     if event_timeout:
         cmd += " --timeout %s" % event
     return command(cmd, **dargs)
+
+
+def move_mouse(name, coordinate, **dargs):
+    """
+    Move VM mouse.
+
+    :param name: domain name
+    :param coordinate: Mouse coordinate
+    """
+    cmd = "mouse_move %s %s" % coordinate
+    qemu_monitor_command(name=name, cmd=cmd, options='--hmp', **dargs)
+    # Sleep 1 sec to make sure VM received mouse move event
+    time.sleep(1)
+
+
+def click_button(name, left_button=True, **dargs):
+    """
+    Click left/right button of VM mouse.
+
+    :param name: domain name
+    :param left_button: Click left or right button
+    """
+    state = 1
+    if not left_button:
+        state = 4
+    cmd = "mouse_button %s" % state
+    qemu_monitor_command(name=name, cmd=cmd, options='--hmp', **dargs)
+    # Sleep 1 sec to make sure VM received mouse button event,
+    # then release button(state=0)
+    time.sleep(1)
+    cmd = "mouse_button 0"
+    qemu_monitor_command(name=name, cmd=cmd, options='--hmp', **dargs)
+    time.sleep(1)
