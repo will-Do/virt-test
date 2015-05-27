@@ -13,6 +13,7 @@ import ovirt
 import aexpect
 from autotest.client import os_dep, utils
 from autotest.client.shared import ssh_key
+import virsh
 
 import libvirt_vm as lvirt
 
@@ -153,6 +154,39 @@ class Target(object):
         return options
 
     # add new target in here.
+
+
+class VirshSessionSASL(virsh.VirshSession):
+
+    """
+    A wrap class for virsh session which used SASL infrastructure.
+    """
+    def __init__(self, params):
+        self.virsh_exec = virsh.VIRSH_EXEC
+        self.uri = params.get('connect_uri')
+        self.sasl_user = params.get('sasl_user')
+        self.sasl_pwd = params.get('sasl_pwd')
+        self.remote_ip = params.get('remote_ip')
+        self.remote_user = params.get('remote_user')
+        self.remote_pwd = params.get('remote_pwd')
+        self.remote_auth = False
+        if self.remote_ip:
+            self.remote_auth = True
+        super(VirshSessionSASL, self).__init__(virsh_exec=self.virsh_exec,
+                                               remote_ip=self.remote_ip,
+                                               remote_user=self.remote_user,
+                                               remote_pwd=self.remote_pwd,
+                                               ssh_remote_auth=self.remote_auth,
+                                               auto_close=True,
+                                               check_libvirtd=False)
+        self.sendline('connect')
+        self.sendline(self.sasl_user)
+        self.sendline(self.sasl_pwd)
+        # make sure session is connected successfully
+        if self.cmd_status('list', timeout=60) != 0:
+            logging.debug("Persistent virsh session is not responding, "
+                          "libvirtd may be dead.")
+            raise aexpect.ShellStatusError(virsh.VIRSH_EXEC, 'list')
 
 
 class VMCheck(object):
